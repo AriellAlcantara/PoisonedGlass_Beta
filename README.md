@@ -5,9 +5,8 @@
 # Progress(If nothing was truly lost):
 
 * # Registration works, data is stored in the same asset folder in a folder named UserData stored as JSON
-* The username entered is sent to the server and displayed(During the recording I realized that this was lost)
-  The wins and loses are stored
-  ===
+* # The username entered is sent to the server and displayed(During the recording I realized that this was lost)
+* # The wins and loses are stored
 
 # Problems:
 
