@@ -65,8 +65,27 @@ namespace GNW2.UI
             else
                 playerUsernames[player] = username;
 
-            // Update the UI with all current usernames
             UpdateAllPlayerNamesUI();
+
+            if (playerUsernames.Count >= 2)
+            {
+                Debug.Log("[GameHandler] Two players detected — broadcasting start to all clients!");
+                // convert to array because Fusion RPCs require serializable types (arrays are supported)
+                var namesArray = new List<string>(playerUsernames.Values).ToArray();
+                RPC_BroadcastGameStart(namesArray);
+            }
+        }
+
+        //  Send the start event to everyone once both players are in
+        [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
+        private void RPC_BroadcastGameStart(string[] usernames)
+        {
+            Debug.Log("[GameHandler] Game start broadcast received — showing Game Panel.");
+            if (GameUIManager.Instance != null)
+            {
+                GameUIManager.Instance.ShowGamePanel();
+                GameUIManager.Instance.UpdateAllPlayerNames(new List<string>(usernames));
+            }
         }
 
         private void UpdateAllPlayerNamesUI()
