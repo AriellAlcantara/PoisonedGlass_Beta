@@ -10,7 +10,7 @@ namespace GNW2.Player
         [SerializeField] private ParticleSystem _hitFx;
 
         private Player _currentPlayer;
-    
+
 
         private void Start()
         {
@@ -30,7 +30,7 @@ namespace GNW2.Player
             Debug.Log($"Current Health: {_currentHealth}");
             RPC_SpawnHitFx(transform.position);
         }
-        
+
         [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
         private void RPC_SpawnHitFx(Vector3 position)
         {
@@ -41,8 +41,8 @@ namespace GNW2.Player
             }
         }
 
-        
-    
-    
+
+
+
     }
 }

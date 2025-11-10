@@ -5,6 +5,7 @@ using System.IO;
 using GNW2.Events;
 using GNW2.GameManager;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 
 namespace GNW2.UI
@@ -292,7 +293,12 @@ namespace GNW2.UI
             // Display the logged-in username immediately
             DisplayOpponentName(user);
 
-            // Send username to GameHandler if it exists
+            // Send username to GameHandler if it exists. If not, try to find it now or retry briefly.
+            if (gameHandler == null)
+            {
+                gameHandler = FindFirstObjectByType<GameHandler>();
+            }
+
             if (gameHandler != null)
             {
                 gameHandler.SendUsernameToServer(user);
@@ -300,18 +306,78 @@ namespace GNW2.UI
             }
             else
             {
-                Debug.LogWarning("[LOGIN] GameHandler not found!");
+                Debug.LogWarning("[LOGIN] GameHandler not found at login — will wait briefly and retry.");
+                StartCoroutine(WaitForGameHandlerAndSend(user));
             }
 
             // Refresh local accounts list to reflect updated lastLoggedIn for UI
             RefreshLocalAccountsList();
         }
+
+        // Retry helper: wait a short time for the network-spawned GameHandler to appear then send username
+        private IEnumerator WaitForGameHandlerAndSend(string username)
+        {
+            const float timeout = 5f;
+            const float pollInterval = 0.2f;
+            float elapsed = 0f;
+
+            while (elapsed < timeout)
+            {
+                gameHandler = FindFirstObjectByType<GameHandler>();
+                if (gameHandler != null)
+                {
+                    gameHandler.SendUsernameToServer(username);
+                    Debug.Log($"[LOGIN] Found GameHandler after {elapsed:0.00}s — sent username: {username}");
+                    yield break;
+                }
+
+                yield return new WaitForSeconds(pollInterval);
+                elapsed += pollInterval;
+            }
+
+            Debug.LogWarning("[LOGIN] GameHandler still not found after waiting — username not sent to server.");
+        }
+
         public void ShowGamePanel()
         {
             HideAllPanels();
-            if (gamePanel != null)
-                gamePanel.SetActive(true);
 
+            if (gamePanel == null)
+            {
+                Debug.LogError("[UI] ShowGamePanel called but gamePanel is null on GameUIManager.Instance!");
+                return;
+            }
+
+            // Activate the panel
+            gamePanel.SetActive(true);
+
+            // Ensure there is an enabled Canvas on the panel or its parents
+            var canvas = gamePanel.GetComponentInParent<Canvas>(true);
+            if (canvas == null)
+            {
+                Debug.LogWarning("[UI] No Canvas found for gamePanel. UI may not render.");
+            }
+            else
+            {
+                if (!canvas.enabled)
+                {
+                    canvas.enabled = true;
+                    Debug.Log("[UI] Enabled Canvas for gamePanel.");
+                }
+                Debug.Log($"[UI] Canvas found: name='{canvas.name}' renderMode={canvas.renderMode} sortingOrder={canvas.sortingOrder}");
+            }
+
+            // Ensure CanvasGroup (if present) is visible & interactable
+            var cg = gamePanel.GetComponentInParent<CanvasGroup>(true);
+            if (cg != null)
+            {
+                if (cg.alpha < 0.01f) cg.alpha = 1f;
+                cg.interactable = true;
+                cg.blocksRaycasts = true;
+                Debug.Log("[UI] Adjusted CanvasGroup on gamePanel parent (alpha/interactable/blocksRaycasts).");
+            }
+
+            Debug.Log($"[UI] Game panel SetActive(true) — activeSelf: {gamePanel.activeSelf}, activeInHierarchy: {gamePanel.activeInHierarchy}");
             Debug.Log("[UI] Game panel activated — both players ready!");
         }
 
