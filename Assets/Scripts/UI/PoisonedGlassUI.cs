@@ -1,76 +1,239 @@
-using System.Collections.Generic;
-using Fusion;
-using GNW2.GameManager;
-using TMPro;
 using UnityEngine;
+using TMPro;
 using UnityEngine.UI;
+using System.Collections;
+using UnityEngine.SceneManagement; // for restarting the scene
 
 namespace GNW2.UI
 {
     public class PoisonedGlassUI : MonoBehaviour
     {
+        [Header("HP Settings")]
+        public int playerHP = 5;
+        public int opponentHP = 5;
+
+        [Header("Batch Settings")]
+        public int totalDrinksInBatch = 6;
+        public int poisonedDrinksInBatch = 2;
+
+        private int drinksLeft;
+        private int poisonedLeft;
+
+        [Header("UI References")]
+        public TMP_Text playerHPText;
+        public TMP_Text opponentHPText;
+        public TMP_Text resultText;
+        public TMP_Text batchInfoText;
+
         [Header("Buttons")]
-        [SerializeField] private Button drinkButton;
-        [SerializeField] private Button makeOtherDrinkButton;
+        public GameObject drinkButton;
+        public GameObject passButton;
+        public GameObject restartButton;
 
-        [Header("Player Display")]
-        [SerializeField] private TMP_Text allPlayersText;
+        [Header("AI Settings")]
+        [Tooltip("How many seconds the AI waits before acting")]
+        public float aiResponseDelay = 1f;
 
-        private GameHandler gameHandler;
+        private bool isPlayerTurn = true;
 
-        private void Awake()
+        private GameUIManager hostUIManager; // new: reference to the UI manager
+
+        void Start()
         {
-            // Use new Unity API for finding components
-            gameHandler = FindFirstObjectByType<GameHandler>();
+            StartNewBatch();
+            UpdateUI();
+            resultText.text = "Your turn! Choose Drink or Pass.";
+            UpdateButtonVisibility();
 
-            if (drinkButton != null)
-                drinkButton.onClick.AddListener(() => OnButtonClicked(0));
-            if (makeOtherDrinkButton != null)
-                makeOtherDrinkButton.onClick.AddListener(() => OnButtonClicked(1));
+            if (restartButton != null) restartButton.SetActive(false);
         }
 
-        private void OnDestroy()
+        // Player chooses to drink
+        public void OnDrink()
         {
-            if (drinkButton != null)
-                drinkButton.onClick.RemoveAllListeners();
-            if (makeOtherDrinkButton != null)
-                makeOtherDrinkButton.onClick.RemoveAllListeners();
-        }
+            if (!isPlayerTurn || IsGameOver()) return;
 
-        private void OnButtonClicked(int choice)
-        {
-            if (gameHandler == null)
+            bool poisoned = DrawDrink();
+            if (poisoned)
             {
-                Debug.LogWarning("[PoisonedGlassUI] GameHandler not found!");
-                return;
+                playerHP--;
+                resultText.text = "You drank poison! -1 HP";
+                EndTurn();
+            }
+            else
+            {
+                resultText.text = "You drank safely! You get to choose again.";
+                UpdateUI();
+            }
+        }
+
+        // Player chooses to pass
+        public void OnPassDrink()
+        {
+            if (!isPlayerTurn || IsGameOver()) return;
+
+            bool poisoned = DrawDrink();
+            if (poisoned)
+            {
+                opponentHP--;
+                resultText.text = "You passed poison! Opponent -1 HP";
+            }
+            else
+            {
+                resultText.text = "You passed a safe drink.";
             }
 
-            // Send player action to GameHandler
-            gameHandler.SendPlayerSelection(choice);
+            UpdateUI();
+            EndTurn();
+        }
+
+        private bool DrawDrink()
+        {
+            if (drinksLeft <= 0)
+            {
+                StartNewBatch();
+            }
+
+            drinksLeft--;
+
+            bool poisoned = false;
+            if (poisonedLeft > 0)
+            {
+                float chance = (float)poisonedLeft / (drinksLeft + 1);
+                if (Random.value < chance)
+                {
+                    poisoned = true;
+                    poisonedLeft--;
+                }
+            }
+
+            UpdateUI();
+            return poisoned;
+        }
+
+        private void EndTurn()
+        {
+            UpdateUI();
+            if (IsGameOver()) return;
+
+            isPlayerTurn = !isPlayerTurn;
+            UpdateButtonVisibility();
+
+            if (!isPlayerTurn)
+            {
+                StartCoroutine(OpponentTurnWithDelay(aiResponseDelay));
+            }
+            else
+            {
+                resultText.text += "\nYour turn!";
+            }
+        }
+
+        private IEnumerator OpponentTurnWithDelay(float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            OpponentTurn();
+        }
+
+        private void OpponentTurn()
+        {
+            if (IsGameOver()) return;
+
+            bool aiChoiceDrink = Random.value > 0.5f;
+
+            if (aiChoiceDrink)
+            {
+                bool poisoned = DrawDrink();
+                if (poisoned)
+                {
+                    opponentHP--;
+                    resultText.text = "Opponent chose DRINK and got poison! -1 HP";
+                }
+                else
+                {
+                    resultText.text = "Opponent chose DRINK and was safe.";
+                }
+            }
+            else
+            {
+                bool poisoned = DrawDrink();
+                if (poisoned)
+                {
+                    playerHP--;
+                    resultText.text = "Opponent chose PASS and gave you poison! -1 HP";
+                }
+                else
+                {
+                    resultText.text = "Opponent chose PASS but it was safe.";
+                }
+            }
+
+            UpdateUI();
+            EndTurn();
+        }
+
+        private void StartNewBatch()
+        {
+            drinksLeft = totalDrinksInBatch;
+            poisonedLeft = poisonedDrinksInBatch;
+        }
+
+        private void UpdateUI()
+        {
+            playerHPText.text = "Player HP: " + playerHP;
+            opponentHPText.text = "Opponent HP: " + opponentHP;
+            batchInfoText.text = $"Batch: {drinksLeft} drinks left, {poisonedLeft} poisoned";
+        }
+
+        private void UpdateButtonVisibility()
+        {
+            drinkButton.SetActive(isPlayerTurn && !IsGameOver());
+            passButton.SetActive(isPlayerTurn && !IsGameOver());
+        }
+
+        private bool IsGameOver()
+        {
+            if (playerHP <= 0)
+            {
+                resultText.text = "You lost! Opponent wins.";
+                UpdateButtonVisibility();
+                if (restartButton != null) restartButton.SetActive(true);
+                return true;
+            }
+            else if (opponentHP <= 0)
+            {
+                resultText.text = "You win! Opponent is out.";
+                UpdateButtonVisibility();
+                if (restartButton != null) restartButton.SetActive(true);
+                return true;
+            }
+            return false;
+        }
+
+        public void RestartGame()
+        {
+            SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
         }
 
         /// <summary>
-        /// Called by GameHandler to update the list of all player names.
+        /// Called by GameUIManager when the Game Panel is shown so the PoisonedGlassUI can
+        /// initialize state and keep a reference to the manager if needed.
         /// </summary>
-        public void UpdateAllPlayerNames(List<string> usernames)
+        public void OnGamePanelShown(GameUIManager uiManager)
         {
-            if (allPlayersText == null)
-            {
-                Debug.LogWarning("[PoisonedGlassUI] allPlayersText not assigned!");
-                return;
-            }
+            hostUIManager = uiManager;
 
-            if (usernames == null || usernames.Count == 0)
-            {
-                allPlayersText.text = "No players connected";
-                return;
-            }
+            // Ensure restart button is hidden when panel shows
+            if (restartButton != null)
+                restartButton.gameObject.SetActive(false);
 
-            allPlayersText.text = "Connected Players:\n";
-            foreach (var name in usernames)
-            {
-                allPlayersText.text += "• " + name + "\n";
-            }
+            // Reset or ensure gameplay UI is in a known state
+            StartNewBatch();
+            UpdateUI();
+            UpdateButtonVisibility();
+
+            if (resultText != null)
+                resultText.text = "Your turn! Choose Drink or Pass.";
         }
     }
 }

@@ -7,6 +7,7 @@ using GNW2.GameManager;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using UnityEngine.SceneManagement;
 
 namespace GNW2.UI
 {
@@ -60,6 +61,39 @@ namespace GNW2.UI
         [Header("Text")]
         public TMP_Text feedbackText;
         public TMP_Text opponentNameText;
+
+        // -----------------------------
+        // PoisonedGlass (merged fields)
+        // -----------------------------
+        [Header("Roulette HP Settings")]
+        public int playerHP = 5;
+        public int opponentHP = 5;
+
+        [Header("Roulette Batch Settings")]
+        public int totalDrinksInBatch = 6;
+        public int poisonedDrinksInBatch = 2;
+
+        private int drinksLeft;
+        private int poisonedLeft;
+
+        [Header("Roulette UI References")]
+        public TMP_Text playerHPText;
+        public TMP_Text opponentHPText;
+        public TMP_Text resultText;
+        public TMP_Text batchInfoText;
+
+        [Header("Roulette Buttons")]
+        public Button drinkButton;
+        public Button passButton;
+        public Button restartButton;
+
+        [Header("AI Settings")]
+        [Tooltip("How many seconds the AI waits before acting")]
+        public float aiResponseDelay = 1f;
+
+        private bool isPlayerTurn = true;
+
+        // ----------------------------
 
         private GameHandler gameHandler;
         private string UserData;
@@ -134,8 +168,46 @@ namespace GNW2.UI
             if (refreshAccountsButton != null)
                 refreshAccountsButton.onClick.AddListener(RefreshLocalAccountsList);
 
+            // Wire up PoisonedGlass buttons (if assigned)
+            if (drinkButton != null)
+                drinkButton.onClick.AddListener(OnDrinkButtonClicked);
+            if (passButton != null)
+                passButton.onClick.AddListener(OnPassButtonClicked);
+            if (restartButton != null)
+                restartButton.onClick.AddListener(RestartGame);
+
             // initial refresh of local accounts
             RefreshLocalAccountsList();
+        }
+
+        private void OnDestroy()
+        {
+            // Remove listeners we've added
+            if (registerButton != null)
+                registerButton.onClick.RemoveListener(OnClick_RegisterButton);
+
+            Button confirmButton = GameObject.Find("ConfirmRegisterButton")?.GetComponent<Button>();
+            if (confirmButton != null)
+                confirmButton.onClick.RemoveListener(RegisterAccount);
+
+            Button loginButton = GameObject.Find("LoginButton")?.GetComponent<Button>();
+            if (loginButton != null)
+                loginButton.onClick.RemoveListener(LoginAccount);
+
+            if (deleteAccountButton != null)
+                deleteAccountButton.onClick.RemoveAllListeners();
+
+            if (refreshAccountsButton != null)
+                refreshAccountsButton.onClick.RemoveListener(RefreshLocalAccountsList);
+
+            if (drinkButton != null)
+                drinkButton.onClick.RemoveListener(OnDrinkButtonClicked);
+            if (passButton != null)
+                passButton.onClick.RemoveListener(OnPassButtonClicked);
+            if (restartButton != null)
+                restartButton.onClick.RemoveListener(RestartGame);
+
+            // Note: EventBus unsubscribe API unknown in this workspace; if available you should unsubscribe here.
         }
 
         private void HideAllPanels()
@@ -379,6 +451,223 @@ namespace GNW2.UI
 
             Debug.Log($"[UI] Game panel SetActive(true) — activeSelf: {gamePanel.activeSelf}, activeInHierarchy: {gamePanel.activeInHierarchy}");
             Debug.Log("[UI] Game panel activated — both players ready!");
+
+            // Initialize merged PoisonedGlass game UI/logic
+            InitializePoisonedGlass();
+        }
+
+        // ============================
+        // PoisonedGlass (merged methods)
+        // ============================
+
+        private void InitializePoisonedGlass()
+        {
+            // Reset gameplay state and UI when the panel is shown
+            StartNewBatch();
+            UpdatePoisonedGlassUI();
+
+            if (resultText != null) resultText.text = "Your turn! Choose Drink or Pass.";
+            UpdatePoisonedGlassButtonVisibility();
+
+            if (restartButton != null)
+                restartButton.gameObject.SetActive(false);
+        }
+
+        private void OnDrinkButtonClicked()
+        {
+            // tell authoritative handler if present
+            if (gameHandler != null)
+            {
+                gameHandler.SendPlayerSelection(0);
+            }
+
+            OnDrink();
+        }
+
+        private void OnPassButtonClicked()
+        {
+            if (gameHandler != null)
+            {
+                gameHandler.SendPlayerSelection(1);
+            }
+
+            OnPassDrink();
+        }
+
+        // Player chooses to drink
+        private void OnDrink()
+        {
+            if (!isPlayerTurn || IsGameOver()) return;
+
+            bool poisoned = DrawDrink();
+            if (poisoned)
+            {
+                playerHP--;
+                if (resultText != null) resultText.text = "You drank poison! -1 HP";
+                EndTurn();
+            }
+            else
+            {
+                if (resultText != null) resultText.text = "You drank safely! You get to choose again.";
+                UpdatePoisonedGlassUI();
+            }
+        }
+
+        // Player chooses to pass
+        private void OnPassDrink()
+        {
+            if (!isPlayerTurn || IsGameOver()) return;
+
+            bool poisoned = DrawDrink();
+            if (poisoned)
+            {
+                opponentHP--;
+                if (resultText != null) resultText.text = "You passed poison! Opponent -1 HP";
+            }
+            else
+            {
+                if (resultText != null) resultText.text = "You passed a safe drink.";
+            }
+
+            UpdatePoisonedGlassUI();
+            EndTurn();
+        }
+
+        private bool DrawDrink()
+        {
+            if (drinksLeft <= 0)
+            {
+                StartNewBatch();
+            }
+
+            drinksLeft--;
+
+            bool poisoned = false;
+            if (poisonedLeft > 0)
+            {
+                float chance = (float)poisonedLeft / (drinksLeft + 1);
+                if (UnityEngine.Random.value < chance)
+                {
+                    poisoned = true;
+                    poisonedLeft--;
+                }
+            }
+
+            UpdatePoisonedGlassUI();
+            return poisoned;
+        }
+
+        private void EndTurn()
+        {
+            UpdatePoisonedGlassUI();
+            if (IsGameOver()) return;
+
+            isPlayerTurn = !isPlayerTurn;
+            UpdatePoisonedGlassButtonVisibility();
+
+            if (!isPlayerTurn)
+            {
+                StartCoroutine(OpponentTurnWithDelay(aiResponseDelay));
+            }
+            else
+            {
+                if (resultText != null) resultText.text += "\nYour turn!";
+            }
+        }
+
+        private IEnumerator OpponentTurnWithDelay(float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            OpponentTurn();
+        }
+
+        private void OpponentTurn()
+        {
+            if (IsGameOver()) return;
+
+            bool aiChoiceDrink = UnityEngine.Random.value > 0.5f;
+
+            if (aiChoiceDrink)
+            {
+                bool poisoned = DrawDrink();
+                if (poisoned)
+                {
+                    opponentHP--;
+                    if (resultText != null) resultText.text = "Opponent chose DRINK and got poison! -1 HP";
+                }
+                else
+                {
+                    if (resultText != null) resultText.text = "Opponent chose DRINK and was safe.";
+                }
+            }
+            else
+            {
+                bool poisoned = DrawDrink();
+                if (poisoned)
+                {
+                    playerHP--;
+                    if (resultText != null) resultText.text = "Opponent chose PASS and gave you poison! -1 HP";
+                }
+                else
+                {
+                    if (resultText != null) resultText.text = "Opponent chose PASS but it was safe.";
+                }
+            }
+
+            UpdatePoisonedGlassUI();
+            EndTurn();
+        }
+
+        private void StartNewBatch()
+        {
+            drinksLeft = totalDrinksInBatch;
+            poisonedLeft = poisonedDrinksInBatch;
+        }
+
+        private void UpdatePoisonedGlassUI()
+        {
+            if (playerHPText != null) playerHPText.text = "Player HP: " + playerHP;
+            if (opponentHPText != null) opponentHPText.text = "Opponent HP: " + opponentHP;
+            if (batchInfoText != null) batchInfoText.text = $"Batch: {drinksLeft} drinks left, {poisonedLeft} poisoned";
+        }
+
+        private void UpdatePoisonedGlassButtonVisibility()
+        {
+            bool show = isPlayerTurn && !IsGameOver();
+
+            if (drinkButton != null)
+                drinkButton.interactable = show;
+            if (passButton != null)
+                passButton.interactable = show;
+
+            if (drinkButton != null)
+                drinkButton.gameObject.SetActive(show);
+            if (passButton != null)
+                passButton.gameObject.SetActive(show);
+        }
+
+        private bool IsGameOver()
+        {
+            if (playerHP <= 0)
+            {
+                if (resultText != null) resultText.text = "You lost! Opponent wins.";
+                UpdatePoisonedGlassButtonVisibility();
+                if (restartButton != null) restartButton.gameObject.SetActive(true);
+                return true;
+            }
+            else if (opponentHP <= 0)
+            {
+                if (resultText != null) resultText.text = "You win! Opponent is out.";
+                UpdatePoisonedGlassButtonVisibility();
+                if (restartButton != null) restartButton.gameObject.SetActive(true);
+                return true;
+            }
+            return false;
+        }
+
+        public void RestartGame()
+        {
+            SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
         }
 
         // ============================
@@ -470,7 +759,7 @@ namespace GNW2.UI
 
         public void DisplayOpponentName(string opponent)
         {
-            opponentNameText.text = $"Player: {opponent}";
+            if (opponentNameText != null) opponentNameText.text = $"Player: {opponent}";
         }
 
         // ============================

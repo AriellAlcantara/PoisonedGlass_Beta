@@ -21,7 +21,6 @@ namespace GNW2.Player
 
         public override void FixedUpdateNetwork()
         {
-            Debug.Log($"Player: {Runner.LocalPlayer.PlayerId} Health: {_currentHealth}");
         }
 
         private void TakeHealthDamage(int damage)
