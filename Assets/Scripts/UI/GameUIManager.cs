@@ -109,13 +109,22 @@ namespace GNW2.UI
                 return;
             }
 
-            // Set up UserData folder
-            UserData = Path.Combine(Application.dataPath, "UserData");
+            // Set up UserData folder (use persistentDataPath for runtime writable storage)
+            UserData = Path.Combine(Application.persistentDataPath, "UserData");
             if (!Directory.Exists(UserData))
                 Directory.CreateDirectory(UserData);
 
             HideAllPanels();
             loginPanel.SetActive(true);
+
+            // If a current user exists in PlayerPrefs (from previous login), show name immediately
+            string savedUser = PlayerPrefs.GetString("CurrentUser", "");
+            if (!string.IsNullOrEmpty(savedUser))
+            {
+                DisplayOpponentName(savedUser);
+                if (opponentNamePanel != null)
+                    opponentNamePanel.SetActive(true);
+            }
         }
 
         private void Start()
@@ -247,7 +256,6 @@ namespace GNW2.UI
             string pass = regPasswordInput.text.Trim();
             string repass = regRepeatPasswordInput.text.Trim();
             string email = regEmailInput.text.Trim();
-
             if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(pass) || string.IsNullOrEmpty(email))
             {
                 if (feedbackText != null) feedbackText.text = "Please fill in all fields.";
@@ -260,39 +268,47 @@ namespace GNW2.UI
                 return;
             }
 
-            string filePath = Path.Combine(UserData, $"{user}.json");
-            if (File.Exists(filePath))
+            // Call backend via PlayerManager (async). On success, also create/update a local JSON as fallback for UI list.
+            PlayerManager.instance.Register(user, pass, email, (success, message) =>
             {
-                if (feedbackText != null) feedbackText.text = "Username already exists!";
-                return;
-            }
+                if (success)
+                {
+                    // create/update local JSON for UI convenience
+                    try
+                    {
+                        string filePath = Path.Combine(UserData, $"{user}.json");
+                        string nowIso = DateTime.UtcNow.ToString("o");
+                        PlayerData newData = new PlayerData
+                        {
+                            username = user,
+                            password = pass,
+                            email = email,
+                            score = 0,
+                            wins = 0,
+                            losses = 0,
+                            creationDate = nowIso,
+                            lastLoggedIn = nowIso
+                        };
+                        string json = JsonUtility.ToJson(newData, true);
+                        File.WriteAllText(filePath, json);
+                        PlayerPrefs.SetFloat($"WinRate_{user}", 0f);
+                        PlayerPrefs.Save();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"[RegisterAccount] Failed to write local fallback file: {ex}");
+                    }
 
-            string nowIso = DateTime.UtcNow.ToString("o");
-            PlayerData newData = new PlayerData
-            {
-                username = user,
-                password = pass,
-                email = email,
-                score = 0,
-                wins = 0,
-                losses = 0,
-                creationDate = nowIso,
-                lastLoggedIn = nowIso
-            };
-
-            string json = JsonUtility.ToJson(newData, true);
-            File.WriteAllText(filePath, json);
-
-            // store initial win rate separately in PlayerPrefs (NOT in JSON)
-            PlayerPrefs.SetFloat($"WinRate_{user}", 0f);
-            PlayerPrefs.Save();
-
-            // Keep players list updated
-            RefreshLocalAccountsList();
-
-            if (feedbackText != null) feedbackText.text = "Account registered!";
-            registerPanel.SetActive(false);
-            loginPanel.SetActive(true);
+                    if (feedbackText != null) feedbackText.text = "Account registered!";
+                    registerPanel.SetActive(false);
+                    loginPanel.SetActive(true);
+                    RefreshLocalAccountsList();
+                }
+                else
+                {
+                    if (feedbackText != null) feedbackText.text = $"Registration failed: {message}";
+                }
+            });
         }
 
         public void LoginAccount()
@@ -300,90 +316,78 @@ namespace GNW2.UI
             string user = loginUsernameInput.text.Trim();
             string pass = loginPasswordInput.text.Trim();
 
-            string filePath = Path.Combine(UserData, $"{user}.json");
-            if (!File.Exists(filePath))
+            if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(pass))
             {
-                if (feedbackText != null) feedbackText.text = "No account found!";
+                if (feedbackText != null) feedbackText.text = "Please enter username and password.";
                 return;
             }
 
-            string json = File.ReadAllText(filePath);
-            PlayerData loaded = JsonUtility.FromJson<PlayerData>(json);
-
-            if (loaded.password != pass)
+            PlayerManager.instance.Login(user, pass, (success, message) =>
             {
-                if (feedbackText != null) feedbackText.text = "Incorrect password!";
-                return;
-            }
+                if (success)
+                {
+                    // Update or create local JSON fallback so the local UI list can work
+                    try
+                    {
+                        string filePath = Path.Combine(UserData, $"{user}.json");
+                        PlayerData loaded = null;
+                        if (File.Exists(filePath))
+                        {
+                            string j = File.ReadAllText(filePath);
+                            try { loaded = JsonUtility.FromJson<PlayerData>(j); } catch { loaded = null; }
+                        }
 
-            currentPlayer = loaded;
+                        if (loaded == null)
+                        {
+                            loaded = new PlayerData
+                            {
+                                username = user,
+                                password = pass,
+                                email = "",
+                                score = 0,
+                                wins = 0,
+                                losses = 0,
+                                creationDate = DateTime.UtcNow.ToString("o")
+                            };
+                        }
 
-            // Compute time since last online based on loaded.lastLoggedIn
-            DateTime prevLoginUtc;
-            string humanized = "Unknown";
-            bool parsed = DateTime.TryParse(loaded.lastLoggedIn, null, System.Globalization.DateTimeStyles.RoundtripKind, out prevLoginUtc);
-            if (parsed)
-            {
-                TimeSpan diff = DateTime.UtcNow - prevLoginUtc;
-                humanized = FormatTimeAgo(diff);
+                        loaded.lastLoggedIn = DateTime.UtcNow.ToString("o");
+                        string updatedJson = JsonUtility.ToJson(loaded, true);
+                        File.WriteAllText(filePath, updatedJson);
 
-                // Save human readable to PlayerPrefs
-                PlayerPrefs.SetString($"LastOnline_{user}", humanized);
-                // Save raw ISO timestamp as well
-                PlayerPrefs.SetString($"LastOnlineRaw_{user}", loaded.lastLoggedIn);
-            }
-            else
-            {
-                // if not parsable, show account creation as fallback
-                humanized = "Never logged in before";
-                PlayerPrefs.SetString($"LastOnline_{user}", humanized);
-            }
+                        float winRate = ComputeWinRate(loaded);
+                        PlayerPrefs.SetFloat($"WinRate_{user}", winRate);
+                        PlayerPrefs.SetString("CurrentUser", user);
+                        PlayerPrefs.Save();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"[LoginAccount] Failed to write local fallback file: {ex}");
+                    }
 
-            // Compute win rate on the fly and store separately (PlayerPrefs), NOT in JSON
-            float winRate = ComputeWinRate(loaded);
-            PlayerPrefs.SetFloat($"WinRate_{user}", winRate);
+                    if (feedbackText != null)
+                        feedbackText.text = "Login successful!";
 
-            PlayerPrefs.SetString("CurrentUser", user);
-            PlayerPrefs.Save();
+                    HideAllPanels();
+                    opponentNamePanel.SetActive(true);
+                    DisplayOpponentName(user);
 
-            // Use the feedback textmesh to show status including last seen and win rate
-            if (feedbackText != null)
-                feedbackText.text = $"Login successful!\nLast seen: {humanized}\nWin Rate: {winRate:0.##}%";
+                    if (gameHandler == null)
+                        gameHandler = FindFirstObjectByType<GameHandler>();
 
-            Debug.Log($"[LOGIN] User '{user}' was last seen: {humanized} (WR: {winRate:0.##}%)");
+                    if (gameHandler != null)
+                        gameHandler.SendUsernameToServer(user);
+                    else
+                        StartCoroutine(WaitForGameHandlerAndSend(user));
 
-            // Update lastLoggedIn to now and persist to JSON
-            loaded.lastLoggedIn = DateTime.UtcNow.ToString("o");
-            string updatedJson = JsonUtility.ToJson(loaded, true);
-            File.WriteAllText(filePath, updatedJson);
-
-            currentPlayer = loaded;
-
-            HideAllPanels();
-            opponentNamePanel.SetActive(true);
-
-            // Display the logged-in username immediately
-            DisplayOpponentName(user);
-
-            // Send username to GameHandler if it exists. If not, try to find it now or retry briefly.
-            if (gameHandler == null)
-            {
-                gameHandler = FindFirstObjectByType<GameHandler>();
-            }
-
-            if (gameHandler != null)
-            {
-                gameHandler.SendUsernameToServer(user);
-                Debug.Log($"[LOGIN] Sending username to server: {user}");
-            }
-            else
-            {
-                Debug.LogWarning("[LOGIN] GameHandler not found at login — will wait briefly and retry.");
-                StartCoroutine(WaitForGameHandlerAndSend(user));
-            }
-
-            // Refresh local accounts list to reflect updated lastLoggedIn for UI
-            RefreshLocalAccountsList();
+                    RefreshLocalAccountsList();
+                }
+                else
+                {
+                    if (feedbackText != null)
+                        feedbackText.text = $"Login failed: {message}";
+                }
+            });
         }
 
         // Retry helper: wait a short time for the network-spawned GameHandler to appear then send username
