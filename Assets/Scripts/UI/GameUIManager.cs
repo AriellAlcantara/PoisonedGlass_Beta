@@ -92,6 +92,7 @@ namespace GNW2.UI
         public float aiResponseDelay = 1f;
 
         private bool isPlayerTurn = true;
+        private bool opponentIsHuman = false;
 
         // ----------------------------
 
@@ -460,21 +461,67 @@ namespace GNW2.UI
             InitializePoisonedGlass();
         }
 
-        // ============================
-        // PoisonedGlass (merged methods)
-        // ============================
-
         private void InitializePoisonedGlass()
         {
             // Reset gameplay state and UI when the panel is shown
             StartNewBatch();
             UpdatePoisonedGlassUI();
 
-            if (resultText != null) resultText.text = "Your turn! Choose Drink or Pass.";
+            // Do NOT assume it's the local player's turn yet — authority will tell clients which player starts.
             UpdatePoisonedGlassButtonVisibility();
+
+            // Ensure panel visibility respects whose turn it is (will be set once server tells starting player)
+            UpdateGamePanelVisibility();
 
             if (restartButton != null)
                 restartButton.gameObject.SetActive(false);
+        }
+
+        // New: called by GameHandler client-side when game start broadcast arrives
+        public void SetStartingPlayer(int startingPlayerId)
+        {
+            // ensure we have a GameHandler reference to access Runner for local player id
+            if (gameHandler == null)
+                gameHandler = FindFirstObjectByType<GameHandler>();
+
+            int localPlayerId = -1;
+            try
+            {
+                if (gameHandler != null && gameHandler.Runner != null)
+                {
+                    localPlayerId = gameHandler.Runner.LocalPlayer.PlayerId;
+                }
+            }
+            catch (Exception)
+            {
+                // ignore - can't determine local id
+            }
+
+            isPlayerTurn = (localPlayerId == startingPlayerId);
+
+            // Update UI visibility + buttons based on who starts
+            UpdateGamePanelVisibility();
+            UpdatePoisonedGlassButtonVisibility();
+
+            if (resultText != null)
+                resultText.text = isPlayerTurn ? "Your turn! Choose Drink or Pass." : "Waiting for opponent...";
+        }
+
+        // New: authoritative turn update from server
+        public void SetTurnPlayer(int playerId)
+        {
+            if (gameHandler == null)
+                gameHandler = FindFirstObjectByType<GameHandler>();
+
+            int localPlayerId = -1;
+            if (gameHandler != null && gameHandler.Runner != null)
+                localPlayerId = gameHandler.Runner.LocalPlayer.PlayerId;
+
+            isPlayerTurn = (localPlayerId == playerId);
+            UpdatePoisonedGlassButtonVisibility();
+
+            if (resultText != null)
+                resultText.text = isPlayerTurn ? "Your turn! Choose Drink or Pass." : "Opponent's turn...";
         }
 
         private void OnDrinkButtonClicked()
@@ -485,6 +532,13 @@ namespace GNW2.UI
                 gameHandler.SendPlayerSelection(0);
             }
 
+            // In PvP, wait for server resolution, do not simulate locally
+            if (opponentIsHuman)
+            {
+                if (resultText != null) resultText.text = "Waiting for server...";
+                return;
+            }
+
             OnDrink();
         }
 
@@ -493,6 +547,13 @@ namespace GNW2.UI
             if (gameHandler != null)
             {
                 gameHandler.SendPlayerSelection(1);
+            }
+
+            // In PvP, wait for server resolution, do not simulate locally
+            if (opponentIsHuman)
+            {
+                if (resultText != null) resultText.text = "Waiting for server...";
+                return;
             }
 
             OnPassDrink();
@@ -566,17 +627,24 @@ namespace GNW2.UI
             UpdatePoisonedGlassUI();
             if (IsGameOver()) return;
 
+            // In PvP, do not toggle locally — wait for server RPC to call SetTurnPlayer(...)
+            if (opponentIsHuman)
+            {
+                UpdatePoisonedGlassButtonVisibility();
+                UpdateGamePanelVisibility();
+                if (resultText != null && !isPlayerTurn) resultText.text = "Waiting for opponent...";
+                return;
+            }
+
+            // Versus AI: local toggle
             isPlayerTurn = !isPlayerTurn;
             UpdatePoisonedGlassButtonVisibility();
+            UpdateGamePanelVisibility();
 
             if (!isPlayerTurn)
-            {
                 StartCoroutine(OpponentTurnWithDelay(aiResponseDelay));
-            }
-            else
-            {
-                if (resultText != null) resultText.text += "\nYour turn!";
-            }
+            else if (resultText != null)
+                resultText.text += "\nYour turn!";
         }
 
         private IEnumerator OpponentTurnWithDelay(float delay)
@@ -589,32 +657,57 @@ namespace GNW2.UI
         {
             if (IsGameOver()) return;
 
+            // If there is a human opponent connected, do not simulate AI here.
+            if (opponentIsHuman)
+            {
+                if (resultText != null) resultText.text = "Waiting for opponent...";
+                return;
+            }
+
             bool aiChoiceDrink = UnityEngine.Random.value > 0.5f;
 
             if (aiChoiceDrink)
+            {
+                ProcessOpponentChoice(0, true);
+            }
+            else
+            {
+                ProcessOpponentChoice(1, true);
+            }
+        }
+
+        /// <summary>
+        /// Apply the opponent's selection (0 = Drink, 1 = Pass).
+        /// If madeByAI is false, this was triggered by a remote human player event.
+        /// </summary>
+        private void ProcessOpponentChoice(int selection, bool madeByAI)
+        {
+            if (IsGameOver()) return;
+
+            if (selection == 0) // Drink
             {
                 bool poisoned = DrawDrink();
                 if (poisoned)
                 {
                     opponentHP--;
-                    if (resultText != null) resultText.text = "Opponent chose DRINK and got poison! -1 HP";
+                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose DRINK and got poison! -1 HP" : "Opponent drank and got poison! -1 HP";
                 }
                 else
                 {
-                    if (resultText != null) resultText.text = "Opponent chose DRINK and was safe.";
+                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose DRINK and was safe." : "Opponent drank safely.";
                 }
             }
-            else
+            else // Pass
             {
                 bool poisoned = DrawDrink();
                 if (poisoned)
                 {
                     playerHP--;
-                    if (resultText != null) resultText.text = "Opponent chose PASS and gave you poison! -1 HP";
+                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose PASS and gave you poison! -1 HP" : "Opponent passed and gave you poison! -1 HP";
                 }
                 else
                 {
-                    if (resultText != null) resultText.text = "Opponent chose PASS but it was safe.";
+                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose PASS but it was safe." : "Opponent passed but it was safe.";
                 }
             }
 
@@ -645,9 +738,22 @@ namespace GNW2.UI
                 passButton.interactable = show;
 
             if (drinkButton != null)
-                drinkButton.gameObject.SetActive(show);
+                drinkButton.gameObject.SetActive(true);
             if (passButton != null)
-                passButton.gameObject.SetActive(show);
+                passButton.gameObject.SetActive(true);
+        }
+
+        /// <summary>
+        /// Hide the entire gamePanel when it's not the player's turn and show it when it is.
+        /// If the game is over, keep the gamePanel visible so end panels can be shown.
+        /// </summary>
+        private void UpdateGamePanelVisibility()
+        {
+            if (gamePanel == null) return;
+
+            // Keep panel always visible; just disable interaction when not your turn.
+            if (!gamePanel.activeSelf)
+                gamePanel.SetActive(true);
         }
 
         private bool IsGameOver()
@@ -657,6 +763,8 @@ namespace GNW2.UI
                 if (resultText != null) resultText.text = "You lost! Opponent wins.";
                 UpdatePoisonedGlassButtonVisibility();
                 if (restartButton != null) restartButton.gameObject.SetActive(true);
+                // Ensure panel visible on game over so the player can see results
+                if (gamePanel != null) gamePanel.SetActive(true);
                 return true;
             }
             else if (opponentHP <= 0)
@@ -664,6 +772,7 @@ namespace GNW2.UI
                 if (resultText != null) resultText.text = "You win! Opponent is out.";
                 UpdatePoisonedGlassButtonVisibility();
                 if (restartButton != null) restartButton.gameObject.SetActive(true);
+                if (gamePanel != null) gamePanel.SetActive(true);
                 return true;
             }
             return false;
@@ -681,6 +790,26 @@ namespace GNW2.UI
         private void OnPlayerMadeSelection(PlayerMadeSelectionEvent evt)
         {
             selectionPanel.SetActive(false);
+
+            // If opponent is a human and the selection came from the other player, apply it locally.
+            // Use gameHandler.Runner.LocalPlayer to determine which PlayerRef is local.
+            if (opponentIsHuman && gameHandler != null)
+            {
+                try
+                {
+                    var localPlayerRef = gameHandler.Runner.LocalPlayer;
+                    // Only apply the event if it came from the remote player (not the local one)
+                    if (!evt.Player.Equals(localPlayerRef))
+                    {
+                        ProcessOpponentChoice(evt.Selection, false);
+                    }
+                }
+                catch (Exception)
+                {
+                    // If we cannot access Runner/LocalPlayer for some reason, do not apply and just wait.
+                    Debug.LogWarning("[OnPlayerMadeSelection] Failed to determine local player; selection ignored here.");
+                }
+            }
         }
 
         private void OnRoundEnded(RoundEndedEvent evt)
@@ -715,6 +844,9 @@ namespace GNW2.UI
         {
             if (allPlayersText == null) return;
 
+            // Determine if there is another connected human player
+            opponentIsHuman = (usernames.Count > 1);
+
             if (usernames.Count == 0)
             {
                 allPlayersText.text = "No players connected.";
@@ -726,6 +858,86 @@ namespace GNW2.UI
             {
                 allPlayersText.text += name + "\n";
             }
+        }
+
+        // ============================
+        // SERVER SYNC (added)
+        // ============================
+
+        // Receive a snapshot from server at start and sync local state
+        public void SyncServerState(int startingPlayerId,
+            int p1Id, int p1Hp, int p2Id, int p2Hp, int drinksLeft, int poisonedLeft)
+        {
+            if (gameHandler == null)
+                gameHandler = FindFirstObjectByType<GameHandler>();
+
+            int me = -1;
+            try
+            {
+                if (gameHandler != null && gameHandler.Runner != null)
+                    me = gameHandler.Runner.LocalPlayer.PlayerId;
+            }
+            catch { }
+
+            if (me == p1Id)
+            {
+                playerHP = p1Hp;
+                opponentHP = p2Hp;
+            }
+            else if (me == p2Id)
+            {
+                playerHP = p2Hp;
+                opponentHP = p1Hp;
+            }
+
+            this.drinksLeft = drinksLeft;
+            this.poisonedLeft = poisonedLeft;
+
+            SetStartingPlayer(startingPlayerId);
+            UpdatePoisonedGlassUI();
+        }
+
+        // Apply authoritative resolution for each action from server
+        public void ApplyServerResolution(int actorId, int selection, bool poisoned, int nextTurnId,
+            int p1Id, int p1Hp, int p2Id, int p2Hp, int drinksLeft, int poisonedLeft)
+        {
+            if (gameHandler == null)
+                gameHandler = FindFirstObjectByType<GameHandler>();
+
+            int me = -1;
+            try
+            {
+                if (gameHandler != null && gameHandler.Runner != null)
+                    me = gameHandler.Runner.LocalPlayer.PlayerId;
+            }
+            catch { }
+
+            if (me == p1Id)
+            {
+                playerHP = p1Hp;
+                opponentHP = p2Hp;
+            }
+            else if (me == p2Id)
+            {
+                playerHP = p2Hp;
+                opponentHP = p1Hp;
+            }
+
+            this.drinksLeft = drinksLeft;
+            this.poisonedLeft = poisonedLeft;
+
+            bool iActed = (actorId == me);
+            string who = iActed ? "You" : "Opponent";
+            if (resultText != null)
+            {
+                if (selection == 0)
+                    resultText.text = poisoned ? $"{who} drank poison! -1 HP" : $"{who} drank safely.";
+                else
+                    resultText.text = poisoned ? $"{who} passed poison! -1 HP to {(iActed ? "opponent" : "you")}" : $"{who} passed a safe drink.";
+            }
+
+            UpdatePoisonedGlassUI();
+            SetTurnPlayer(nextTurnId);
         }
 
         // ============================
