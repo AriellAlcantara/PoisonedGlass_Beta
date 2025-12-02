@@ -1,5 +1,6 @@
 using UnityEngine;
 using System;
+using System.Collections.Generic;
 
 /// <summary>
 /// Manages player data locally using PlayerPrefs
@@ -90,6 +91,11 @@ public class PlayerManager : MonoBehaviour
             if (response != null && response.success && response.data != null)
             {
                 Debug.Log($"Login successful! Welcome, {response.data.username}");
+
+                // Set session password for subsequent authenticated requests (server requires password per request)
+                if (GameBackendManager.instance != null)
+                    GameBackendManager.instance.SetSessionPassword(password);
+
                 SavePlayerToPrefs(response.data);
                 onComplete?.Invoke(true, response.message);
             }
@@ -109,6 +115,12 @@ public class PlayerManager : MonoBehaviour
     {
         ClearPlayerPrefs();
         currentPlayer = null;
+        // Clear session password from backend manager
+        if (GameBackendManager.instance != null)
+        {
+            GameBackendManager.instance.SetSessionPassword(string.Empty);
+            GameBackendManager.instance.SetAuthToken(string.Empty);
+        }
         Debug.Log("Player logged out");
     }
 
@@ -217,11 +229,80 @@ public class PlayerManager : MonoBehaviour
         }
     }
 
+    // ===== New: Authenticated helpers =====
+
+    /// <summary>
+    /// Get all users (server does not implement yet). Returns false.
+    /// </summary>
+    public void GetUsers(Action<bool, string, List<PlayerData>> onComplete)
+    {
+        GameBackendManager.instance.GetUsers((resp) =>
+        {
+            if (resp != null && resp.success)
+                onComplete?.Invoke(true, resp.message, resp.data);
+            else
+                onComplete?.Invoke(false, resp?.message ?? "Get users failed", null);
+        });
+    }
+
+    /// <summary>
+    /// Get a specific user by ID (password-based auth via server)
+    /// </summary>
+    public void GetUserById(string id, Action<bool, string, PlayerData> onComplete)
+    {
+        GameBackendManager.instance.GetUserById(id, (resp) =>
+        {
+            if (resp != null && resp.success && resp.data != null)
+                onComplete?.Invoke(true, resp.message, resp.data);
+            else
+                onComplete?.Invoke(false, resp?.message ?? "Get user failed", null);
+        });
+    }
+
+    /// <summary>
+    /// Update/log player score on backend (password required by server)
+    /// </summary>
+    public void UpdatePlayerScore(int score, Action<bool, string> onComplete = null)
+    {
+        if (currentPlayer == null || string.IsNullOrEmpty(currentPlayer.id))
+        {
+            Debug.LogWarning("No player logged in");
+            onComplete?.Invoke(false, "Not logged in");
+            return;
+        }
+
+        GameBackendManager.instance.UpdatePlayerScore(currentPlayer.id, score, (resp) =>
+        {
+            if (resp != null && resp.success)
+            {
+                onComplete?.Invoke(true, resp.message);
+            }
+            else
+            {
+                onComplete?.Invoke(false, resp?.message ?? "Update score failed");
+            }
+        });
+    }
+
+    /// <summary>
+    /// Get leaderboard (server not yet implemented). Returns false.
+    /// </summary>
+    public void GetLeaderboard(int limit, Action<bool, string, List<LeaderboardEntry>> onComplete)
+    {
+        int capped = Mathf.Clamp(limit, 1, 10);
+        GameBackendManager.instance.GetLeaderboard(capped, (resp) =>
+        {
+            if (resp != null && resp.success)
+                onComplete?.Invoke(true, resp.message, resp.data);
+            else
+                onComplete?.Invoke(false, resp?.message ?? "Get leaderboard failed", null);
+        });
+    }
+
     #endregion
 
     #region PlayerPrefs Management
 
-    /// <summary>
     /// <summary>
     /// Save player data to PlayerPrefs (from backend PlayerData)
     /// </summary>

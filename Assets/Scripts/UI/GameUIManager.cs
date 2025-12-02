@@ -62,6 +62,11 @@ namespace GNW2.UI
         public TMP_Text feedbackText;
         public TMP_Text opponentNameText;
 
+        [Header("Player Stats UI")] // NEW fixed syntax
+        public GameObject playerStatsPanel; // panel to show stats
+        public TMP_Text playerStatsText;    // text area for stats
+        public Button statsToggleButton;    // single button to toggle stats panel
+
         // -----------------------------
         // PoisonedGlass (merged fields)
         // -----------------------------
@@ -126,6 +131,17 @@ namespace GNW2.UI
                 if (opponentNamePanel != null)
                     opponentNamePanel.SetActive(true);
             }
+
+            if (playerStatsText != null && allPlayersText != null && playerStatsText == allPlayersText)
+            {
+                Debug.LogWarning("[GameUIManager] playerStatsText and allPlayersText reference the SAME TMP_Text. Creating a separate stats text automatically.");
+                var go = new GameObject("PlayerStatsText_Auto");
+                go.transform.SetParent(playerStatsPanel != null ? playerStatsPanel.transform : this.transform, false);
+                playerStatsText = go.AddComponent<TMPro.TextMeshProUGUI>();
+                playerStatsText.fontSize = 32;
+                playerStatsText.alignment = TMPro.TextAlignmentOptions.TopLeft;
+                playerStatsText.text = "Player Stats";
+            }
         }
 
         private void Start()
@@ -165,8 +181,8 @@ namespace GNW2.UI
 
                     if (ValidateCredentials(userToDelete, passEntered, out _))
                     {
-                        // optional extra safety: you could show a confirm dialog here
-                        DeleteAccount(userToDelete);
+                        // If logged in as same user and have token, delete remotely first
+                        TryDeleteAccountBackendThenLocal(userToDelete);
                     }
                     else
                     {
@@ -178,6 +194,10 @@ namespace GNW2.UI
             if (refreshAccountsButton != null)
                 refreshAccountsButton.onClick.AddListener(RefreshLocalAccountsList);
 
+            // Wire player stats buttons (NEW)
+            if (statsToggleButton != null)
+                statsToggleButton.onClick.AddListener(TogglePlayerStatsPanel);
+
             // Wire up PoisonedGlass buttons (if assigned)
             if (drinkButton != null)
                 drinkButton.onClick.AddListener(OnDrinkButtonClicked);
@@ -188,6 +208,32 @@ namespace GNW2.UI
 
             // initial refresh of local accounts
             RefreshLocalAccountsList();
+        }
+
+        private void TryDeleteAccountBackendThenLocal(string username)
+        {
+            bool didCallBackend = false;
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm != null && pm.IsPlayerLoggedIn() && PlayerPrefs.GetString("CurrentUser", "") == username)
+                {
+                    didCallBackend = true;
+                    pm.DeletePlayerAccount();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[DeleteAccount] Backend delete exception: {ex.Message}");
+            }
+
+            // Always remove local JSON as well
+            DeleteAccount(username);
+
+            if (feedbackText != null)
+            {
+                feedbackText.text = didCallBackend ? "Account deleted (backend + local)." : "Account deleted locally.";
+            }
         }
 
         private void OnDestroy()
@@ -217,6 +263,10 @@ namespace GNW2.UI
             if (restartButton != null)
                 restartButton.onClick.RemoveListener(RestartGame);
 
+            // Remove stats buttons listeners (NEW)
+            if (statsToggleButton != null)
+                statsToggleButton.onClick.RemoveListener(TogglePlayerStatsPanel);
+
             // Note: EventBus unsubscribe API unknown in this workspace; if available you should unsubscribe here.
         }
 
@@ -231,6 +281,10 @@ namespace GNW2.UI
             opponentNamePanel.SetActive(false);
             if (gamePanel != null)
                 gamePanel.SetActive(false);
+            if (playerStatsPanel != null)
+                playerStatsPanel.SetActive(false);
+            if (statsToggleButton != null) // hide toggle button when we explicitly hide everything
+                statsToggleButton.gameObject.SetActive(false);
         }
 
         // ============================
@@ -325,7 +379,7 @@ namespace GNW2.UI
 
             PlayerManager.instance.Login(user, pass, (success, message) =>
             {
-                if (success)
+                if (success && PlayerManager.instance != null && PlayerManager.instance.IsPlayerLoggedIn())
                 {
                     // Update or create local JSON fallback so the local UI list can work
                     try
@@ -360,6 +414,8 @@ namespace GNW2.UI
                         PlayerPrefs.SetFloat($"WinRate_{user}", winRate);
                         PlayerPrefs.SetString("CurrentUser", user);
                         PlayerPrefs.Save();
+
+                        currentPlayer = loaded; // cache for personal stats
                     }
                     catch (Exception ex)
                     {
@@ -382,11 +438,31 @@ namespace GNW2.UI
                         StartCoroutine(WaitForGameHandlerAndSend(user));
 
                     RefreshLocalAccountsList();
+
+                    // Ensure stats toggle button remains visible after login even though login panel was hidden
+                    if (statsToggleButton != null)
+                    {
+                        if (loginPanel != null && statsToggleButton.transform.IsChildOf(loginPanel.transform))
+                        {
+                            statsToggleButton.transform.SetParent(loginPanel.transform.parent, true);
+                        }
+                        statsToggleButton.gameObject.SetActive(true);
+                    }
                 }
                 else
                 {
+                    // Keep login panel visible, do not hide any UI
                     if (feedbackText != null)
                         feedbackText.text = $"Login failed: {message}";
+
+                    if (loginPanel != null && !loginPanel.activeSelf)
+                        loginPanel.SetActive(true);
+
+                    // Ensure other panels remain hidden after a failed attempt
+                    if (opponentNamePanel != null) opponentNamePanel.SetActive(false);
+                    if (gamePanel != null) gamePanel.SetActive(false);
+                    if (playerStatsPanel != null) playerStatsPanel.SetActive(false); // ensure hidden on failed login
+                    if (statsToggleButton != null) statsToggleButton.gameObject.SetActive(true); // keep toggle button visible for retry
                 }
             });
         }
@@ -680,7 +756,7 @@ namespace GNW2.UI
         /// Apply the opponent's selection (0 = Drink, 1 = Pass).
         /// If madeByAI is false, this was triggered by a remote human player event.
         /// </summary>
-        private void ProcessOpponentChoice(int selection, bool madeByAI)
+        private void ProcessOpponentChoice(int selection, bool AiSelection)
         {
             if (IsGameOver()) return;
 
@@ -690,11 +766,11 @@ namespace GNW2.UI
                 if (poisoned)
                 {
                     opponentHP--;
-                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose DRINK and got poison! -1 HP" : "Opponent drank and got poison! -1 HP";
+                    if (resultText != null) resultText.text = AiSelection ? "Opponent chose DRINK and got poison! -1 HP" : "Opponent drank and got poison! -1 HP";
                 }
                 else
                 {
-                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose DRINK and was safe." : "Opponent drank safely.";
+                    if (resultText != null) resultText.text = AiSelection ? "Opponent chose DRINK and was safe." : "Opponent drank safely.";
                 }
             }
             else // Pass
@@ -703,11 +779,11 @@ namespace GNW2.UI
                 if (poisoned)
                 {
                     playerHP--;
-                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose PASS and gave you poison! -1 HP" : "Opponent passed and gave you poison! -1 HP";
+                    if (resultText != null) resultText.text = AiSelection ? "Opponent chose PASS and gave you poison! -1 HP" : "Opponent passed and gave you poison! -1 HP";
                 }
                 else
                 {
-                    if (resultText != null) resultText.text = madeByAI ? "Opponent chose PASS but it was safe." : "Opponent passed but it was safe.";
+                    if (resultText != null) resultText.text = AiSelection ? "Opponent chose PASS but it was safe." : "Opponent passed but it was safe.";
                 }
             }
 
@@ -971,6 +1047,24 @@ namespace GNW2.UI
             PlayerPrefs.SetFloat($"WinRate_{currentPlayer.username}", wr);
 
             PlayerPrefs.Save();
+
+            // Push score to backend (auth required)
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm != null)
+                {
+                    pm.UpdatePlayerScore(currentPlayer.score, (ok, msg) =>
+                    {
+                        if (!ok)
+                            Debug.LogWarning($"[Backend] Failed to update score: {msg}");
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Backend] Exception while updating score: {ex.Message}");
+            }
         }
 
         public void DisplayOpponentName(string opponent)
@@ -1098,6 +1192,33 @@ namespace GNW2.UI
             allPlayersText.text = string.Join("\n", lines);
         }
 
+        // Helper to query leaderboard from backend and append to UI (optional use)
+        private void FetchAndShowLeaderboard()
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || allPlayersText == null) return;
+
+                pm.GetLeaderboard(10, (ok, msg, data) =>
+                {
+                    if (!ok) { Debug.LogWarning($"[Backend] Leaderboard fetch failed: {msg}"); return; }
+                    if (data == null) return;
+
+                    allPlayersText.text += "\n\nTop 10 Leaderboard:\n";
+                    int rank = 1;
+                    foreach (var e in data)
+                    {
+                        allPlayersText.text += $"#{rank++} {e.username} - {e.score}\n";
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Backend] Exception while fetching leaderboard: {ex.Message}");
+            }
+        }
+
         // Compute win rate on the fly (do NOT store in JSON)
         public float ComputeWinRate(PlayerData pd)
         {
@@ -1133,6 +1254,91 @@ namespace GNW2.UI
             // fallback: weeks / months
             int days = (int)diff.TotalDays;
             return $"{days} days ago.";
+        }
+
+        // ============================
+        // PLAYER STATS PANEL (NEW)
+        // ============================
+        private void TogglePlayerStatsPanel()
+        {
+            if (PlayerManager.instance == null || !PlayerManager.instance.IsPlayerLoggedIn())
+            {
+                if (feedbackText != null) feedbackText.text = "Login first to view stats.";
+                return;
+            }
+            if (playerStatsPanel == null)
+            {
+                Debug.LogWarning("[PlayerStats] Panel not assigned.");
+                return;
+            }
+            if (playerStatsText == null)
+            {
+                Debug.LogWarning("[PlayerStats] Text component missing.");
+                return;
+            }
+            bool willShow = !playerStatsPanel.activeSelf;
+            playerStatsPanel.SetActive(willShow);
+            if (willShow)
+            {
+                BuildCachedStats(); // immediate local stats
+                FetchAndDisplayPlayerStats(); // async backend refresh
+            }
+        }
+
+        private void BuildCachedStats()
+        {
+            var local = PlayerManager.instance.GetCurrentPlayer();
+            if (local == null)
+            {
+                playerStatsText.text = "Player Stats\nNo local player data.";
+                return;
+            }
+            // Use cached currentPlayer for wins / losses if available
+            int wins = currentPlayer != null ? currentPlayer.wins : PlayerPrefs.GetInt($"Wins_{local.username}", 0);
+            int losses = currentPlayer != null ? currentPlayer.losses : PlayerPrefs.GetInt($"Losses_{local.username}", 0);
+            float winRate = 0f;
+            int totalWL = wins + losses;
+            if (totalWL > 0) winRate = (float)wins / totalWL * 100f;
+            playerStatsText.text =
+                "Player Stats (Local)\n" +
+                $"Username: {local.username}\n" +
+                $"Email: {local.email}\n" +
+                $"Level: {local.level}\n" +
+                $"Experience: {local.experience}\n" +
+                $"Wins: {wins}\n" +
+                $"Losses: {losses}\n" +
+                $"Win Rate: {winRate:0.##}%";
+        }
+
+        private void FetchAndDisplayPlayerStats()
+        {
+            var local = PlayerManager.instance.GetCurrentPlayer();
+            if (local == null || string.IsNullOrEmpty(local.id))
+            {
+                playerStatsText.text += "\n(No player ID for backend fetch)";
+                return;
+            }
+            playerStatsText.text += "\nRefreshing from server...";
+            GameBackendManager.instance.GetPlayerData(local.id, OnPlayerStatsResponse);
+        }
+
+        private void OnPlayerStatsResponse(GetPlayerResponse resp)
+        {
+            if (resp == null || !resp.success || resp.data == null)
+            {
+                playerStatsText.text += "\nBackend: failed to load.";
+                return;
+            }
+            var d = resp.data;
+            playerStatsText.text =
+                "Player Stats (Server)\n" +
+                $"Username: {d.username}\n" +
+                $"Email: {d.email}\n" +
+                $"Level: {d.level}\n" +
+                $"Experience: {d.experience}\n" +
+                $"Score: {d.score}\n" +
+                $"Wins: {d.wins}\n" +
+                $"Losses: {d.losses}";
         }
     }
 }

@@ -6,10 +6,19 @@ using System.Collections.Generic;
 public class GameBackendManager : MonoBehaviour
 {
     private string apiBaseUrl = "http://localhost:5000/api";
-    
+
+    // JWT or other bearer token returned by backend after login (optional; current backend doesn't issue tokens)
+    private string authToken;
+
+    // Store plaintext session password in memory ONLY (required by current backend API). Do NOT persist.
+    private string sessionPassword;
+
+    // Admin secret for admin-only endpoints (/api/players)
+    private string adminSecret;
+
     // Singleton instance
     public static GameBackendManager instance { get; private set; }
-    
+
     private void Awake()
     {
         if (instance != null && instance != this)
@@ -26,6 +35,29 @@ public class GameBackendManager : MonoBehaviour
     public void SetServerUrl(string url)
     {
         apiBaseUrl = url;
+    }
+
+    public void SetAuthToken(string token)
+    {
+        authToken = token;
+    }
+
+    public void SetSessionPassword(string password)
+    {
+        sessionPassword = password;
+    }
+
+    public void SetAdminSecret(string secret)
+    {
+        adminSecret = secret;
+    }
+
+    private void MaybeAttachAuth(UnityWebRequest req)
+    {
+        if (!string.IsNullOrEmpty(authToken))
+        {
+            req.SetRequestHeader("Authorization", $"Bearer {authToken}");
+        }
     }
 
     #region Authentication Routes
@@ -104,6 +136,16 @@ public class GameBackendManager : MonoBehaviour
             if (www.result == UnityWebRequest.Result.Success)
             {
                 var response = JsonUtility.FromJson<LoginResponse>(www.downloadHandler.text);
+
+                // If the backend returns a token, cache it for subsequent authenticated calls
+                if (response != null && !string.IsNullOrEmpty(response.token))
+                {
+                    authToken = response.token;
+                }
+
+                // Cache plaintext password for subsequent authenticated calls (server requires password).
+                sessionPassword = password;
+
                 onComplete?.Invoke(response);
             }
             else
@@ -124,7 +166,7 @@ public class GameBackendManager : MonoBehaviour
     #region Player Data Routes
 
     /// <summary>
-    /// Get player data
+    /// Get player data (current backend requires password each request). Uses POST /api/player/get
     /// </summary>
     public void GetPlayerData(string playerId, System.Action<GetPlayerResponse> onComplete)
     {
@@ -133,10 +175,19 @@ public class GameBackendManager : MonoBehaviour
 
     private IEnumerator GetPlayerDataCoroutine(string playerId, System.Action<GetPlayerResponse> onComplete)
     {
-        using (UnityWebRequest www = UnityWebRequest.Get($"{apiBaseUrl}/player?id={playerId}"))
+        var payload = new AuthGetPlayerRequest
         {
+            id = playerId,
+            password = sessionPassword
+        };
+        string jsonData = JsonUtility.ToJson(payload);
+
+        using (UnityWebRequest www = UnityWebRequest.PostWwwForm($"{apiBaseUrl}/player/get", ""))
+        {
+            www.uploadHandler = new UploadHandlerRaw(System.Text.Encoding.UTF8.GetBytes(jsonData));
             www.downloadHandler = new DownloadHandlerBuffer();
             www.SetRequestHeader("Content-Type", "application/json");
+            MaybeAttachAuth(www);
 
             yield return www.SendWebRequest();
 
@@ -159,7 +210,7 @@ public class GameBackendManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Update player data
+    /// Update player core data (requires currentPassword)
     /// </summary>
     public void UpdatePlayerData(string playerId, int level, int experience, string email, System.Action<UpdatePlayerResponse> onComplete)
     {
@@ -173,7 +224,8 @@ public class GameBackendManager : MonoBehaviour
             id = playerId,
             level = level,
             experience = experience,
-            email = email
+            email = email,
+            currentPassword = sessionPassword
         };
 
         string jsonData = JsonUtility.ToJson(updateData);
@@ -182,6 +234,7 @@ public class GameBackendManager : MonoBehaviour
         {
             www.downloadHandler = new DownloadHandlerBuffer();
             www.SetRequestHeader("Content-Type", "application/json");
+            MaybeAttachAuth(www);
 
             yield return www.SendWebRequest();
 
@@ -204,7 +257,7 @@ public class GameBackendManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Delete player
+    /// Delete player (current backend requires password in body). Uses DELETE /api/delete with JSON body.
     /// </summary>
     public void DeletePlayer(string playerId, System.Action<DeletePlayerResponse> onComplete)
     {
@@ -213,10 +266,15 @@ public class GameBackendManager : MonoBehaviour
 
     private IEnumerator DeletePlayerCoroutine(string playerId, System.Action<DeletePlayerResponse> onComplete)
     {
-        using (UnityWebRequest www = UnityWebRequest.Delete($"{apiBaseUrl}/delete/{playerId}"))
+        var payload = new FlexibleDeleteRequest { id = playerId, password = sessionPassword };
+        string jsonData = JsonUtility.ToJson(payload);
+
+        using (UnityWebRequest www = new UnityWebRequest($"{apiBaseUrl}/delete", UnityWebRequest.kHttpVerbDELETE))
         {
+            www.uploadHandler = new UploadHandlerRaw(System.Text.Encoding.UTF8.GetBytes(jsonData));
             www.downloadHandler = new DownloadHandlerBuffer();
             www.SetRequestHeader("Content-Type", "application/json");
+            MaybeAttachAuth(www);
 
             yield return www.SendWebRequest();
 
@@ -234,6 +292,141 @@ public class GameBackendManager : MonoBehaviour
                 };
                 onComplete?.Invoke(errorResponse);
                 Debug.LogError("Delete Player Error: " + www.error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Get all users (admin-only). Sends admin secret via x-admin-password header.
+    /// </summary>
+    public void GetUsers(System.Action<GetUsersResponse> onComplete)
+    {
+        StartCoroutine(GetUsersCoroutine(onComplete));
+    }
+
+    private IEnumerator GetUsersCoroutine(System.Action<GetUsersResponse> onComplete)
+    {
+        using (UnityWebRequest www = UnityWebRequest.Get($"{apiBaseUrl}/players"))
+        {
+            www.downloadHandler = new DownloadHandlerBuffer();
+            www.SetRequestHeader("Content-Type", "application/json");
+            if (!string.IsNullOrEmpty(adminSecret))
+            {
+                www.SetRequestHeader("x-admin-password", adminSecret);
+            }
+            MaybeAttachAuth(www);
+
+            yield return www.SendWebRequest();
+
+            if (www.result == UnityWebRequest.Result.Success)
+            {
+                var response = JsonUtility.FromJson<GetUsersResponse>(www.downloadHandler.text);
+                onComplete?.Invoke(response);
+            }
+            else
+            {
+                var errorResponse = new GetUsersResponse
+                {
+                    success = false,
+                    message = www.error
+                };
+                onComplete?.Invoke(errorResponse);
+                Debug.LogError("Get Users Error: " + www.error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Get a specific user by id using same auth flow as GetPlayerData (password required).
+    /// </summary>
+    public void GetUserById(string playerId, System.Action<GetPlayerResponse> onComplete)
+    {
+        GetPlayerData(playerId, onComplete);
+    }
+
+    /// <summary>
+    /// Update player's score (requires currentPassword). Uses PUT /api/player.
+    /// </summary>
+    public void UpdatePlayerScore(string playerId, int score, System.Action<UpdateScoreResponse> onComplete)
+    {
+        StartCoroutine(UpdatePlayerScoreCoroutine(playerId, score, onComplete));
+    }
+
+    private IEnumerator UpdatePlayerScoreCoroutine(string playerId, int score, System.Action<UpdateScoreResponse> onComplete)
+    {
+        var body = new UpdateScorePutRequest
+        {
+            id = playerId,
+            currentPassword = sessionPassword,
+            score = score
+        };
+        string jsonData = JsonUtility.ToJson(body);
+
+        using (UnityWebRequest www = UnityWebRequest.Put($"{apiBaseUrl}/player", System.Text.Encoding.UTF8.GetBytes(jsonData)))
+        {
+            www.downloadHandler = new DownloadHandlerBuffer();
+            www.SetRequestHeader("Content-Type", "application/json");
+            MaybeAttachAuth(www);
+
+            yield return www.SendWebRequest();
+
+            if (www.result == UnityWebRequest.Result.Success)
+            {
+                // server returns UpdatePlayerResponse shape; adapt to UpdateScoreResponse for client
+                var raw = JsonUtility.FromJson<UpdatePlayerResponse>(www.downloadHandler.text);
+                var mapped = new UpdateScoreResponse
+                {
+                    success = raw != null && raw.success,
+                    message = raw != null ? raw.message : www.error,
+                    data = raw != null ? raw.data : null
+                };
+                onComplete?.Invoke(mapped);
+            }
+            else
+            {
+                var errorResponse = new UpdateScoreResponse
+                {
+                    success = false,
+                    message = www.error
+                };
+                onComplete?.Invoke(errorResponse);
+                Debug.LogError("Update Score Error: " + www.error);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Get leaderboard (public endpoint on backend)
+    /// </summary>
+    public void GetLeaderboard(int limit, System.Action<GetLeaderboardResponse> onComplete)
+    {
+        StartCoroutine(GetLeaderboardCoroutine(limit, onComplete));
+    }
+
+    private IEnumerator GetLeaderboardCoroutine(int limit, System.Action<GetLeaderboardResponse> onComplete)
+    {
+        using (UnityWebRequest www = UnityWebRequest.Get($"{apiBaseUrl}/leaderboard?limit={limit}"))
+        {
+            www.downloadHandler = new DownloadHandlerBuffer();
+            www.SetRequestHeader("Content-Type", "application/json");
+            // No auth needed per backend
+
+            yield return www.SendWebRequest();
+
+            if (www.result == UnityWebRequest.Result.Success)
+            {
+                var response = JsonUtility.FromJson<GetLeaderboardResponse>(www.downloadHandler.text);
+                onComplete?.Invoke(response);
+            }
+            else
+            {
+                var errorResponse = new GetLeaderboardResponse
+                {
+                    success = false,
+                    message = www.error
+                };
+                onComplete?.Invoke(errorResponse);
+                Debug.LogError("Get Leaderboard Error: " + www.error);
             }
         }
     }
@@ -271,6 +464,7 @@ public class LoginResponse
 {
     public bool success;
     public string message;
+    public string token; // JWT or similar
     public PlayerData data;
 }
 
@@ -282,6 +476,9 @@ public class PlayerData
     public string email;
     public int level;
     public int experience;
+    public int score; // optional if backend supports
+    public int wins;
+    public int losses;
 }
 
 [System.Serializable]
@@ -293,12 +490,21 @@ public class GetPlayerResponse
 }
 
 [System.Serializable]
+public class AuthGetPlayerRequest
+{
+    public string id;
+    public string username;
+    public string password;
+}
+
+[System.Serializable]
 public class UpdatePlayerRequest
 {
     public string id;
     public int level;
     public int experience;
     public string email;
+    public string currentPassword;
 }
 
 [System.Serializable]
@@ -314,6 +520,53 @@ public class DeletePlayerResponse
 {
     public bool success;
     public string message;
+}
+
+[System.Serializable]
+public class GetUsersResponse
+{
+    public bool success;
+    public string message;
+    public List<PlayerData> data;
+}
+
+[System.Serializable]
+public class UpdateScorePutRequest
+{
+    public string id;
+    public string currentPassword;
+    public int score;
+}
+
+[System.Serializable]
+public class UpdateScoreResponse
+{
+    public bool success;
+    public string message;
+    public PlayerData data;
+}
+
+[System.Serializable]
+public class LeaderboardEntry
+{
+    public string username;
+    public int score;
+}
+
+[System.Serializable]
+public class GetLeaderboardResponse
+{
+    public bool success;
+    public string message;
+    public List<LeaderboardEntry> data;
+}
+
+[System.Serializable]
+public class FlexibleDeleteRequest
+{
+    public string id;
+    public string username;
+    public string password;
 }
 
 #endregion
