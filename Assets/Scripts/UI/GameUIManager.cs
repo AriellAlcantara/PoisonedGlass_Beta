@@ -1263,6 +1263,11 @@ namespace GNW2.UI
         {
             if (PlayerManager.instance == null || !PlayerManager.instance.IsPlayerLoggedIn())
             {
+                // Show panel with sign-in prompt instead of data
+                if (playerStatsPanel != null)
+                    playerStatsPanel.SetActive(true);
+                if (playerStatsText != null)
+                    playerStatsText.text = "Sign in first to see stats";
                 if (feedbackText != null) feedbackText.text = "Login first to view stats.";
                 return;
             }
